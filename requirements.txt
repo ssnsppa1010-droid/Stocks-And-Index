@@ -5,3 +5,4 @@ pandas
 requests
 logzero
 websocket-client
+fyers-apiv3
