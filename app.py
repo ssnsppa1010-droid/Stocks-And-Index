@@ -1,10 +1,10 @@
 # ============================================================
 #  Multi-Broker Stock & Index Data Downloader  (WEBSITE version)
-#  - Broker-a dropdown la select pannalaam
-#  - Angel One = full velai seyyum
-#  - Mathi broker = "ippo support illa" nu nallaa kaattum
-#  - Puthu broker serkka:  keezha BROKERS dict la oru entry add pannunga
-#  Run panna:  streamlit run app.py
+#  - Select a broker from the dropdown
+#  - Angel One = fully working
+#  - Other brokers = shows a clean "not supported yet" message
+#  - To add a new broker: add an entry in the BROKERS dict below
+#  Run:  streamlit run app.py
 # ============================================================
 
 import streamlit as st
@@ -15,10 +15,10 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="Stock & Index Data Downloader",
                    page_icon="📈", layout="centered")
 st.title("Stock & Index Data Downloader")
-st.caption("Broker select pannunga -> login podunga -> peyar podunga -> CSV download.")
+st.caption("Select broker -> enter login -> enter names -> download CSV.")
 
 # ============================================================
-#  PART A : ANGEL ONE adapter  (idhu full velai seyyum)
+#  PART A : ANGEL ONE adapter  (this one fully works)
 # ============================================================
 ANGEL_NATIVE = {
     '1min':'ONE_MINUTE', '3min':'THREE_MINUTE', '5min':'FIVE_MINUTE',
@@ -43,19 +43,19 @@ ANGEL_KNOWN_INDEX = {
 def _norm(s):
     return str(s).upper().replace(' ', '').replace('-', '')
 
-@st.cache_data(show_spinner="Angel instrument list load aaguthu...")
+@st.cache_data(show_spinner="Loading Angel instrument list...")
 def angel_instruments():
     url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
     return pd.DataFrame(requests.get(url).json())
 
 def angel_login(creds):
-    """creds = dict. Login aagi session obj-a return pannum. Fail aana Exception."""
+    """Logs in and returns a session object. Raises Exception on failure."""
     from SmartApi import SmartConnect
     obj = SmartConnect(api_key=creds['api_key'])
     data = obj.generateSession(creds['client_id'], creds['mpin'],
                                pyotp.TOTP(creds['totp_secret']).now())
     if not data.get('status'):
-        raise Exception("Login fail aaiduchu. Details check pannunga.")
+        raise Exception("Login failed. Please check your details.")
     return obj
 
 def angel_get_token(session, name, data_type):
@@ -111,14 +111,15 @@ def angel_fetch(session, token, timeframe, from_date, to_date):
 
 # ============================================================
 #  PART B : BROKERS registry
-#  Puthu broker serkka -> inga oru entry add pannunga.
-#  "supported": True  -> login/get_token/fetch function venum
-#  "supported": False -> "ippo support illa" nu kaattum (note sollalaam)
+#  To add a new broker -> add an entry here.
+#  "supported": True  -> needs login/get_token/fetch + data_types
+#  "supported": False -> shows "not supported yet" (with a note)
 # ============================================================
 BROKERS = {
     "Angel One": {
         "supported": True,
-        "fields": [   # (key, label, password-aa?)
+        "data_types": ["stocks", "index"],
+        "fields": [   # (key, label, is-password?)
             ("api_key",     "API Key",         True),
             ("client_id",   "Client ID",       False),
             ("mpin",        "MPIN / Password",  True),
@@ -130,53 +131,55 @@ BROKERS = {
         "fetch":     angel_fetch,
     },
 
-    # ---- keezha ellam innum serkkala (slot mattum) ----
-    "Zerodha": {
-        "supported": False,
-        "note": "Zerodha OAuth login venum (login link click panni token vaanganum) "
-                "+ historical data ku ~Rs.2000/month subscription. Tani setup venum."},
-    "Upstox": {
-        "supported": False,
-        "note": "Upstox OAuth login venum. Account ready aana add pannalaam."},
+    # ---- not added yet (slots only) ----
     "Fyers": {
         "supported": False,
-        "note": "Fyers OAuth login venum. Historical data free (1-2 varusham)."},
+        "note": "Fyers uses OAuth login. Free historical data (1-2 years). "
+                "Needed for MCX commodities. Setup in progress."},
+    "Zerodha": {
+        "supported": False,
+        "note": "Zerodha uses OAuth login (click a link, get a token) and needs "
+                "a ~Rs.2000/month subscription for historical data."},
+    "Upstox": {
+        "supported": False,
+        "note": "Upstox uses OAuth login. Can be added once the account is ready."},
     "Dhan": {
         "supported": False,
-        "note": "Dhan access-token login. Data ku ~Rs.500/month plan venum."},
+        "note": "Dhan uses access-token login. Needs a ~Rs.500/month data plan."},
 }
 
 # ============================================================
 #  PART C : UI
 # ============================================================
-st.subheader("1. Broker select pannunga")
+st.subheader("1. Select your broker")
 broker_name = st.selectbox("Broker", list(BROKERS.keys()))
 broker = BROKERS[broker_name]
 
-# ---- broker support illana, inga-eye nikkanum (neenga ketta "not allowed" message) ----
+# ---- if broker not supported, stop here with a clean message ----
 if not broker.get("supported"):
-    st.warning(f"**{broker_name}** -- ippo support illa.\n\n{broker.get('note','')}")
-    st.info("Ippothaiku **Angel One** select panni use pannunga. "
-            "Vera broker venum-na, andha account ready aana sollunga - add panren.")
+    st.warning(f"**{broker_name}** is not supported yet.\n\n{broker.get('note','')}")
+    st.info("For now, please select **Angel One**. "
+            "Want another broker? Tell me once the account is ready and it can be added.")
     st.stop()
 
-# ---- support irukkra broker ku login fields kaattu ----
-st.subheader("2. Unga login")
-st.info("Indha details unga account-oda. Naanga save pannala - ovvoru thadava-um "
-        "neenga thaan podanum.")
+# ---- supported broker: show login fields ----
+st.subheader("2. Your login")
+st.info("These details belong to your own account. We do not save anything - "
+        "you enter them each time.")
 
 creds = {}
 field_list = broker["fields"]
-for j in range(0, len(field_list), 2):       # 2-2 column-a kaattu
+for j in range(0, len(field_list), 2):       # show 2 per row
     cols = st.columns(2)
     for col, (key, label, is_pw) in zip(cols, field_list[j:j+2]):
         creds[key] = col.text_input(label, type="password" if is_pw else "default")
 
-st.subheader("3. Enna data venum?")
-data_type = st.radio("Vagai", ["stocks", "index"], horizontal=True,
-                     format_func=lambda x: "Stocks" if x=="stocks" else "Index")
+st.subheader("3. What data do you want?")
+data_types = broker["data_types"]
+data_type = st.radio("Type", data_types, horizontal=True,
+                     format_func=lambda x: x.capitalize())
 placeholder = "SBIN, RELIANCE, TCS" if data_type=="stocks" else "NIFTY50, NIFTYBANK, NIFTY500"
-names_raw = st.text_area("Peyar (comma vachi pirikkavum)", placeholder=placeholder)
+names_raw = st.text_area("Names (separate with commas)", placeholder=placeholder)
 
 timeframe = st.selectbox("Timeframe", broker["timeframes"],
                          index=broker["timeframes"].index('4h')
@@ -186,34 +189,34 @@ from_date = d1.date_input("From date", value=datetime(2016, 9, 1))
 to_date   = d2.date_input("To date",   value=datetime(2025, 12, 31))
 
 st.divider()
-run = st.button("Data eduthu kudu", type="primary", use_container_width=True)
+run = st.button("Download data", type="primary", use_container_width=True)
 
 # ============================================================
 #  PART D : RUN
 # ============================================================
 if run:
     if not all(creds.values()):
-        st.error("Login details ellam podunga."); st.stop()
+        st.error("Please fill in all login details."); st.stop()
     names = [n.strip() for n in names_raw.replace("\n", ",").split(",") if n.strip()]
     if not names:
-        st.error("Konjam peyar podunga."); st.stop()
+        st.error("Please enter at least one name."); st.stop()
     if from_date >= to_date:
-        st.error("From date, To date-ku munnadi irukkanum."); st.stop()
+        st.error("From date must be before To date."); st.stop()
 
     f_date = datetime.combine(from_date, datetime.min.time())
     t_date = datetime.combine(to_date, datetime.min.time())
 
     # --- login ---
     try:
-        with st.spinner("Login aaguthu..."):
+        with st.spinner("Logging in..."):
             session = broker["login"](creds)
-        st.success("Login Successful!")
+        st.success("Login successful!")
     except Exception as e:
         st.error(f"Login error: {e}"); st.stop()
 
-    # --- token + fetch ovvoru peyar-ku-um ---
+    # --- resolve token + fetch for each name ---
     results, not_found, no_data = {}, [], []
-    prog = st.progress(0.0, text="Data eduthuttu iruken...")
+    prog = st.progress(0.0, text="Fetching data...")
     for i, nm in enumerate(names, 1):
         prog.progress((i-1)/len(names), text=f"{nm} ...")
         try:
@@ -226,18 +229,18 @@ if run:
             results[nm] = df
         except Exception as e:
             no_data.append(f"{nm} ({e})")
-    prog.progress(1.0, text="Mudinjiduchu!")
+    prog.progress(1.0, text="Done!")
 
-    # --- message-a thelivaa pirichu kaattu (peyar thappa? data illa?) ---
+    # --- show clear messages (wrong name? no data?) ---
     if not_found:
-        st.warning("Peyar match aagala (spelling paarunga): " + ", ".join(not_found))
+        st.warning("Name not matched (check spelling): " + ", ".join(not_found))
     if no_data:
-        st.warning("Data varala (broker plan / date range paarunga): " + ", ".join(no_data))
+        st.warning("No data (check broker plan / date range): " + ", ".join(no_data))
     if not results:
-        st.error("Onnum data varala."); st.stop()
+        st.error("No data returned."); st.stop()
 
     # --- download ---
-    st.success(f"{len(results)} file ready!")
+    st.success(f"{len(results)} file(s) ready!")
     for name, df in results.items():
         with st.expander(f"{name}_{timeframe}.csv -- {len(df)} rows"):
             st.dataframe(df.head(10), use_container_width=True)
@@ -250,7 +253,7 @@ if run:
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for name, df in results.items():
                 zf.writestr(f"{name}_{timeframe}.csv", df.to_csv())
-        st.download_button("Ella file-um onnaa (ZIP)", buf.getvalue(),
+        st.download_button("Download all as ZIP", buf.getvalue(),
                            file_name=f"{broker_name}_{timeframe}.zip",
                            mime="application/zip", type="primary",
                            use_container_width=True)
