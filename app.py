@@ -1,9 +1,10 @@
 # ============================================================
-#  Multi-Broker Stock & Index Data Downloader  (WEBSITE version)
+#  Multi-Broker Stock / Index / MCX Data Downloader  (WEBSITE version)
 #  - Select a broker from the dropdown
-#  - Angel One = fully working
-#  - Other brokers = shows a clean "not supported yet" message
-#  - To add a new broker: add an entry in the BROKERS dict below
+#  - Angel One  -> Stocks, Index      (fully working)
+#  - Fyers      -> MCX commodities    (fully working)
+#  - Other brokers = "not supported yet" message
+#  - To add a broker: add an entry in the BROKERS dict below
 #  Run:  streamlit run app.py
 # ============================================================
 
@@ -12,13 +13,13 @@ import pandas as pd
 import requests, pyotp, time, io, zipfile
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Stock & Index Data Downloader",
+st.set_page_config(page_title="Stock / Index / MCX Data Downloader",
                    page_icon="📈", layout="centered")
-st.title("Stock & Index Data Downloader")
+st.title("Stock / Index / MCX Data Downloader")
 st.caption("Select broker -> enter login -> enter names -> download CSV.")
 
 # ============================================================
-#  PART A : ANGEL ONE adapter  (this one fully works)
+#  PART A : ANGEL ONE adapter  (Stocks + Index)
 # ============================================================
 ANGEL_NATIVE = {
     '1min':'ONE_MINUTE', '3min':'THREE_MINUTE', '5min':'FIVE_MINUTE',
@@ -49,7 +50,6 @@ def angel_instruments():
     return pd.DataFrame(requests.get(url).json())
 
 def angel_login(creds):
-    """Logs in and returns a session object. Raises Exception on failure."""
     from SmartApi import SmartConnect
     obj = SmartConnect(api_key=creds['api_key'])
     data = obj.generateSession(creds['client_id'], creds['mpin'],
@@ -64,7 +64,7 @@ def angel_get_token(session, name, data_type):
         df = inst[(inst['name'] == name) & (inst['exch_seg'] == 'NSE') &
                   (inst['instrumenttype'] == '')]
         return df.iloc[0]['token'] if len(df) else None
-    else:
+    else:  # index
         key = _norm(name)
         if key in ANGEL_KNOWN_INDEX:
             return ANGEL_KNOWN_INDEX[key]
@@ -77,7 +77,6 @@ def angel_get_token(session, name, data_type):
         return None
 
 def angel_fetch(session, token, timeframe, from_date, to_date):
-    # timeframe -> Angel interval
     if timeframe in ANGEL_NATIVE:
         interval, resample_to = ANGEL_NATIVE[timeframe], None
     else:
@@ -110,10 +109,76 @@ def angel_fetch(session, token, timeframe, from_date, to_date):
     return df
 
 # ============================================================
+#  PART A2 : FYERS adapter  (MCX commodities)
+#  Login = App ID + Access Token (generate token separately, paste here).
+# ============================================================
+FYERS_RES = {'1min':'1', '5min':'5', '15min':'15', '30min':'30',
+             '1h':'60', '4h':'240', '1day':'D'}
+
+@st.cache_data(show_spinner="Loading Fyers MCX symbol master...")
+def fyers_mcx_master():
+    url = "https://public.fyers.in/sym_details/MCX_COM.csv"
+    return pd.read_csv(url, header=None, dtype=str)
+
+def fyers_login(creds):
+    from fyers_apiv3 import fyersModel
+    fy = fyersModel.FyersModel(client_id=creds['client_id'],
+                               token=creds['access_token'],
+                               is_async=False, log_path="")
+    prof = fy.get_profile()
+    if prof.get('s') != 'ok':
+        raise Exception("Fyers login failed. Access token may be expired - "
+                        "generate a fresh token and paste it again.")
+    return fy
+
+def fyers_find_mcx_symbol(name):
+    mcx = fyers_mcx_master()
+    key = name.upper()
+    for c in mcx.columns:
+        col = mcx[c].astype(str)
+        if col.str.startswith("MCX:").any():
+            cand = mcx[col.str.upper().str.contains(f":{key}", na=False) &
+                       col.str.upper().str.contains("FUT", na=False) &
+                       ~col.str.upper().str.contains("OPT", na=False)]
+            if len(cand):
+                syms = [s for s in cand[c].tolist()
+                        if s.upper().split(':')[1].startswith(key)]
+                if syms:
+                    return sorted(syms)[0]   # nearest active contract
+    return None
+
+def fyers_get_token(session, name, data_type):
+    # For MCX: return the Fyers symbol string (e.g. MCX:GOLDM...FUT)
+    return fyers_find_mcx_symbol(name)
+
+def fyers_fetch(session, symbol, timeframe, from_date, to_date):
+    res = FYERS_RES[timeframe]
+    chunk_days = 360 if res == 'D' else 90
+    all_c, cur = [], from_date
+    while cur < to_date:
+        end = min(cur + timedelta(days=chunk_days), to_date)
+        data = {"symbol":symbol, "resolution":res, "date_format":"1",
+                "range_from":cur.strftime("%Y-%m-%d"),
+                "range_to":end.strftime("%Y-%m-%d"), "cont_flag":"1"}
+        try:
+            r = session.history(data=data)
+            if r.get('s') == 'ok' and r.get('candles'):
+                all_c.extend(r['candles'])
+        except Exception:
+            time.sleep(2)
+        cur = end + timedelta(days=1)
+        time.sleep(0.4)
+
+    if not all_c:
+        return None
+    df = pd.DataFrame(all_c, columns=['ts','Open','High','Low','Close','Volume'])
+    df['Date'] = pd.to_datetime(df['ts'], unit='s', utc=True).dt.tz_convert('Asia/Kolkata')
+    df = df.drop(columns=['ts']).set_index('Date').sort_index()
+    df = df[~df.index.duplicated(keep='first')]
+    return df
+
+# ============================================================
 #  PART B : BROKERS registry
-#  To add a new broker -> add an entry here.
-#  "supported": True  -> needs login/get_token/fetch + data_types
-#  "supported": False -> shows "not supported yet" (with a note)
 # ============================================================
 BROKERS = {
     "Angel One": {
@@ -131,11 +196,23 @@ BROKERS = {
         "fetch":     angel_fetch,
     },
 
-    # ---- not added yet (slots only) ----
     "Fyers": {
-        "supported": False,
-        "note": "Fyers uses OAuth login. Free historical data (1-2 years). "
-                "Needed for MCX commodities. Setup in progress."},
+        "supported": True,
+        "data_types": ["mcx"],
+        "fields": [
+            ("client_id",    "App ID (client_id)", False),
+            ("access_token", "Access Token",       True),
+        ],
+        "timeframes": list(FYERS_RES),
+        "login":     fyers_login,
+        "get_token": fyers_get_token,
+        "fetch":     fyers_fetch,
+        "login_help": "Note: the Fyers access token expires (usually by the next "
+                      "morning). Generate a fresh token with your auto-token method "
+                      "and paste it here each time.",
+    },
+
+    # ---- not added yet (slots only) ----
     "Zerodha": {
         "supported": False,
         "note": "Zerodha uses OAuth login (click a link, get a token) and needs "
@@ -148,6 +225,21 @@ BROKERS = {
         "note": "Dhan uses access-token login. Needs a ~Rs.500/month data plan."},
 }
 
+# labels + example placeholders per data type
+TYPE_LABELS  = {"stocks":"Stocks", "index":"Index", "mcx":"MCX"}
+PLACEHOLDERS = {"stocks":"SBIN, RELIANCE, TCS",
+                "index":"NIFTY50, NIFTYBANK, NIFTY500",
+                "mcx":"GOLDM, SILVERM, CRUDEOIL"}
+
+# All 3 segments are always shown. Each broker only *supports* some of them.
+ALL_SEGMENTS = ["stocks", "index", "mcx"]
+# For each segment, which supported brokers can provide it (for a helpful hint)
+SEGMENT_PROVIDERS = {
+    seg: [n for n, b in BROKERS.items()
+          if b.get("supported") and seg in b.get("data_types", [])]
+    for seg in ALL_SEGMENTS
+}
+
 # ============================================================
 #  PART C : UI
 # ============================================================
@@ -155,37 +247,47 @@ st.subheader("1. Select your broker")
 broker_name = st.selectbox("Broker", list(BROKERS.keys()))
 broker = BROKERS[broker_name]
 
-# ---- if broker not supported, stop here with a clean message ----
 if not broker.get("supported"):
     st.warning(f"**{broker_name}** is not supported yet.\n\n{broker.get('note','')}")
-    st.info("For now, please select **Angel One**. "
-            "Want another broker? Tell me once the account is ready and it can be added.")
+    st.info("For now, please select **Angel One** (Stocks/Index) or **Fyers** (MCX).")
     st.stop()
 
-# ---- supported broker: show login fields ----
 st.subheader("2. Your login")
 st.info("These details belong to your own account. We do not save anything - "
         "you enter them each time.")
+if broker.get("login_help"):
+    st.caption(broker["login_help"])
 
 creds = {}
 field_list = broker["fields"]
-for j in range(0, len(field_list), 2):       # show 2 per row
+for j in range(0, len(field_list), 2):       # 2 fields per row
     cols = st.columns(2)
     for col, (key, label, is_pw) in zip(cols, field_list[j:j+2]):
         creds[key] = col.text_input(label, type="password" if is_pw else "default")
 
 st.subheader("3. What data do you want?")
-data_types = broker["data_types"]
-data_type = st.radio("Type", data_types, horizontal=True,
-                     format_func=lambda x: x.capitalize())
-placeholder = "SBIN, RELIANCE, TCS" if data_type=="stocks" else "NIFTY50, NIFTYBANK, NIFTY500"
-names_raw = st.text_area("Names (separate with commas)", placeholder=placeholder)
+# Always show all 3 segments. Default to one this broker actually supports.
+default_seg = broker["data_types"][0] if broker.get("data_types") else "stocks"
+data_type = st.radio("Type", ALL_SEGMENTS,
+                     index=ALL_SEGMENTS.index(default_seg),
+                     horizontal=True,
+                     format_func=lambda x: TYPE_LABELS.get(x, x.capitalize()))
+
+# Is this segment available on the chosen broker?
+segment_ok = data_type in broker.get("data_types", [])
+if not segment_ok:
+    providers = SEGMENT_PROVIDERS.get(data_type, [])
+    hint = f" For {TYPE_LABELS[data_type]}, please use: {', '.join(providers)}." if providers else ""
+    st.warning(f"{broker_name}'s API cannot provide {TYPE_LABELS[data_type]} data.{hint}")
+
+names_raw = st.text_area("Names (separate with commas)",
+                         placeholder=PLACEHOLDERS.get(data_type, ""))
 
 timeframe = st.selectbox("Timeframe", broker["timeframes"],
                          index=broker["timeframes"].index('4h')
                          if '4h' in broker["timeframes"] else 0)
 d1, d2 = st.columns(2)
-from_date = d1.date_input("From date", value=datetime(2016, 9, 1))
+from_date = d1.date_input("From date", value=datetime(2016, 1, 1))
 to_date   = d2.date_input("To date",   value=datetime(2025, 12, 31))
 
 st.divider()
@@ -195,6 +297,13 @@ run = st.button("Download data", type="primary", use_container_width=True)
 #  PART D : RUN
 # ============================================================
 if run:
+    # segment supported by this broker?
+    if not segment_ok:
+        providers = SEGMENT_PROVIDERS.get(data_type, [])
+        hint = f" Please select: {', '.join(providers)}." if providers else ""
+        st.error(f"This API is not able to give {TYPE_LABELS[data_type]} data "
+                 f"({broker_name}).{hint}")
+        st.stop()
     if not all(creds.values()):
         st.error("Please fill in all login details."); st.stop()
     names = [n.strip() for n in names_raw.replace("\n", ",").split(",") if n.strip()]
@@ -206,7 +315,6 @@ if run:
     f_date = datetime.combine(from_date, datetime.min.time())
     t_date = datetime.combine(to_date, datetime.min.time())
 
-    # --- login ---
     try:
         with st.spinner("Logging in..."):
             session = broker["login"](creds)
@@ -214,7 +322,6 @@ if run:
     except Exception as e:
         st.error(f"Login error: {e}"); st.stop()
 
-    # --- resolve token + fetch for each name ---
     results, not_found, no_data = {}, [], []
     prog = st.progress(0.0, text="Fetching data...")
     for i, nm in enumerate(names, 1):
@@ -231,15 +338,13 @@ if run:
             no_data.append(f"{nm} ({e})")
     prog.progress(1.0, text="Done!")
 
-    # --- show clear messages (wrong name? no data?) ---
     if not_found:
-        st.warning("Name not matched (check spelling): " + ", ".join(not_found))
+        st.warning("Name/symbol not matched (check spelling): " + ", ".join(not_found))
     if no_data:
-        st.warning("No data (check broker plan / date range): " + ", ".join(no_data))
+        st.warning("No data (check broker plan / date range / token): " + ", ".join(no_data))
     if not results:
         st.error("No data returned."); st.stop()
 
-    # --- download ---
     st.success(f"{len(results)} file(s) ready!")
     for name, df in results.items():
         with st.expander(f"{name}_{timeframe}.csv -- {len(df)} rows"):
