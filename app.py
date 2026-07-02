@@ -109,11 +109,21 @@ def angel_fetch(session, token, timeframe, from_date, to_date):
     return df
 
 # ============================================================
-#  PART A2 : FYERS adapter  (MCX commodities)
+#  PART A2 : FYERS adapter  (Stocks + Index + MCX)
 #  Login = App ID + Access Token (generate token separately, paste here).
 # ============================================================
 FYERS_RES = {'1min':'1', '5min':'5', '15min':'15', '30min':'30',
              '1h':'60', '4h':'240', '1day':'D'}
+
+# Common index name -> Fyers symbol (fallback builds NSE:<NAME>-INDEX)
+FYERS_INDEX_MAP = {
+    'NIFTY50':'NSE:NIFTY50-INDEX', 'NIFTY':'NSE:NIFTY50-INDEX',
+    'NIFTYBANK':'NSE:NIFTYBANK-INDEX', 'BANKNIFTY':'NSE:NIFTYBANK-INDEX',
+    'NIFTY500':'NSE:NIFTY500-INDEX', 'NIFTY100':'NSE:NIFTY100-INDEX',
+    'NIFTYNEXT50':'NSE:NIFTYNEXT50-INDEX', 'NIFTYIT':'NSE:NIFTYIT-INDEX',
+    'FINNIFTY':'NSE:FINNIFTY-INDEX', 'MIDCPNIFTY':'NSE:MIDCPNIFTY-INDEX',
+    'INDIAVIX':'NSE:INDIAVIX-INDEX',
+}
 
 @st.cache_data(show_spinner="Loading Fyers MCX symbol master...")
 def fyers_mcx_master():
@@ -148,8 +158,18 @@ def fyers_find_mcx_symbol(name):
     return None
 
 def fyers_get_token(session, name, data_type):
-    # For MCX: return the Fyers symbol string (e.g. MCX:GOLDM...FUT)
-    return fyers_find_mcx_symbol(name)
+    if data_type == 'mcx':
+        # e.g. MCX:GOLDM...FUT (front-month, from the master)
+        return fyers_find_mcx_symbol(name)
+    elif data_type == 'stocks':
+        # NSE equity: NSE:SBIN-EQ  (keep hyphens like BAJAJ-AUTO, M&M)
+        key = name.strip().upper()
+        return f"NSE:{key}-EQ"
+    elif data_type == 'index':
+        # NSE index: NSE:NIFTY50-INDEX  (map known ones, else build it)
+        key = name.strip().upper().replace(' ', '')
+        return FYERS_INDEX_MAP.get(key, f"NSE:{key}-INDEX")
+    return None
 
 def fyers_fetch(session, symbol, timeframe, from_date, to_date):
     res = FYERS_RES[timeframe]
@@ -159,7 +179,8 @@ def fyers_fetch(session, symbol, timeframe, from_date, to_date):
         end = min(cur + timedelta(days=chunk_days), to_date)
         data = {"symbol":symbol, "resolution":res, "date_format":"1",
                 "range_from":cur.strftime("%Y-%m-%d"),
-                "range_to":end.strftime("%Y-%m-%d"), "cont_flag":"1"}
+                "range_to":end.strftime("%Y-%m-%d"),
+                "cont_flag": "1" if "FUT" in symbol.upper() else "0"}
         try:
             r = session.history(data=data)
             if r.get('s') == 'ok' and r.get('candles'):
@@ -198,7 +219,7 @@ BROKERS = {
 
     "Fyers": {
         "supported": True,
-        "data_types": ["mcx"],
+        "data_types": ["stocks", "index", "mcx"],
         "fields": [
             ("client_id",    "App ID (client_id)", False),
             ("access_token", "Access Token",       True),
