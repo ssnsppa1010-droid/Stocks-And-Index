@@ -10,7 +10,7 @@
 
 import streamlit as st
 import pandas as pd
-import requests, pyotp, time, io, zipfile
+import requests, pyotp, time, io, zipfile, inspect
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Stock / Index / MCX Data Downloader",
@@ -261,6 +261,25 @@ SEGMENT_PROVIDERS = {
     for seg in ALL_SEGMENTS
 }
 
+# ---- Selectable name lists for the searchable dropdown ----
+# Plain names only (SBIN, NIFTY50, GOLDM). Each broker builds its own symbol.
+@st.cache_data(show_spinner="Loading stock list...")
+def nse_stock_names():
+    inst = angel_instruments()   # public JSON, no login needed
+    names = inst[(inst['exch_seg'] == 'NSE') & (inst['instrumenttype'] == '')]['name']
+    return sorted(n for n in names.dropna().unique().tolist() if n)
+
+INDEX_NAMES = sorted(set(list(ANGEL_KNOWN_INDEX.keys()) + list(FYERS_INDEX_MAP.keys())))
+MCX_NAMES = ['GOLD', 'GOLDM', 'SILVER', 'SILVERM', 'CRUDEOIL', 'CRUDEOILM',
+             'NATURALGAS', 'NATGASMINI', 'COPPER', 'ZINC', 'ZINCMINI', 'ALUMINIUM',
+             'ALUMINI', 'LEAD', 'LEADMINI', 'NICKEL', 'MENTHAOIL', 'COTTON', 'CARDAMOM']
+
+def segment_options(data_type):
+    if data_type == 'stocks': return nse_stock_names()
+    if data_type == 'index':  return INDEX_NAMES
+    if data_type == 'mcx':    return MCX_NAMES
+    return []
+
 # ============================================================
 #  PART C : UI
 # ============================================================
@@ -301,8 +320,28 @@ if not segment_ok:
     hint = f" For {TYPE_LABELS[data_type]}, please use: {', '.join(providers)}." if providers else ""
     st.warning(f"{broker_name}'s API cannot provide {TYPE_LABELS[data_type]} data.{hint}")
 
-names_raw = st.text_area("Names (separate with commas)",
-                         placeholder=PLACEHOLDERS.get(data_type, ""))
+# Names: searchable multi-select — click to see the full list, type to filter,
+# select many, and (on newer Streamlit) type your own custom names too.
+options = segment_options(data_type) if segment_ok else []
+_accept_new = "accept_new_options" in inspect.signature(st.multiselect).parameters
+
+eg = PLACEHOLDERS.get(data_type, "")
+ms_kwargs = dict(options=options,
+                 placeholder=f"Click to pick, or type to search (e.g. {eg})")
+if _accept_new:
+    ms_kwargs["accept_new_options"] = True
+
+picked = st.multiselect("Names", **ms_kwargs)
+names = list(dict.fromkeys([str(s).strip() for s in picked if str(s).strip()]))
+
+# Fallback for older Streamlit that can't add custom typed names
+if not _accept_new:
+    extra = st.text_input("Other names not in the list (comma separated)",
+                          placeholder=eg)
+    for n in extra.split(","):
+        n = n.strip()
+        if n and n not in names:
+            names.append(n)
 
 timeframe = st.selectbox("Timeframe", broker["timeframes"],
                          index=broker["timeframes"].index('4h')
@@ -327,9 +366,8 @@ if run:
         st.stop()
     if not all(creds.values()):
         st.error("Please fill in all login details."); st.stop()
-    names = [n.strip() for n in names_raw.replace("\n", ",").split(",") if n.strip()]
     if not names:
-        st.error("Please enter at least one name."); st.stop()
+        st.error("Please select or type at least one name."); st.stop()
     if from_date >= to_date:
         st.error("From date must be before To date."); st.stop()
 
